@@ -18,19 +18,19 @@ class YOLOv4Inference:
         self.output_layers = [self.layer_names[i - 1] for i in self.net.getUnconnectedOutLayers()]
 
         with open(self.class_names_path, 'r') as f:
-            self.classes = f.read().strip().split('\n')
+            self.class_names = f.read().strip().split('\n')
 
     def infer_image(self, img):
         height, width, _ = img.shape
         blob = cv2.dnn.blobFromImage(img, scalefactor=1/255.0, size=(416, 416), swapRB=True, crop=False)
         self.net.setInput(blob)
-
+        
         outputs = self.net.forward(self.output_layers)
-
+        
         class_ids = []
         confidences = []
         boxes = []
-
+        
         for output in outputs:
             for detection in output:
                 scores = detection[5:]
@@ -41,43 +41,50 @@ class YOLOv4Inference:
                     center_y = int(detection[1] * height)
                     w = int(detection[2] * width)
                     h = int(detection[3] * height)
-
+            
                     x = int(center_x - w / 2)
                     y = int(center_y - h / 2)
-
+            
                     boxes.append([x, y, w, h])
                     confidences.append(float(confidence))
                     class_ids.append(class_id)
-
+        
         indexes = cv2.dnn.NMSBoxes(boxes, confidences, self.confidence_threshold, self.nms_threshold)
-
+        
         detected_classes = []
-        if indexes:
-            for i in indexes:
-                label = str(self.classes[class_ids[i]])
-                detected_classes.append(label)
+        for i in indexes:
+            detected_classes.append((self.class_names[class_ids[i]], boxes[i]))
 
-        # Return the image and the first detected class (if any)
-        return img, detected_classes[0] if detected_classes else None
+        return img, detected_classes
 
+    def infer_image_only(self, img):
+        _, detected_classes = self.infer_image(img)
+        # Check if any classes were detected
+        if detected_classes:
+            return {"detected_class": detected_classes[0]}  # Return the detected class only
+        else:
+            return {"detected_class": "Unrecognized Color"}  # Return a default value or handle the absence of detections
 
-    def infer_and_save(self, img, track_id):
-        # Perform inference and get the annotated image and detected classes with x-coordinates
-        annotated_image, detected_classes_with_x = self.infer_image(img)
+    def infer_and_save(self, plate_image, track_id):
+        # Perform inference and get the detected class
+        _, detected_classes = self.infer_image(plate_image)
+        
+        
+        if detected_classes:
+            # Assuming there's only one detected class
+            detected_class, box = detected_classes[0]
+            x, y, w, h = box
 
-        # Check if detected_classes_with_x is not None and not empty (optional)
-        if detected_classes_with_x:
-            # Extract the detected class directly (assuming only one class is present)
-            detected_class = detected_classes_with_x
-
-            # Generate the output filename based on the detected class
-            output_filename = f"{track_id}_{detected_class}.jpg"
-
+            # Generate the output filename based on the detected class and track ID
+            output_filename = f"{detected_class}_{track_id}.jpg"
+            
             output_path = output_filename
+            
+            # Save the plate image
+            cv2.imwrite(output_path, plate_image)
 
-            # Save the annotated image
-            cv2.imwrite(output_path, annotated_image)
-
-            return {"detected_class": detected_class, "track_id": track_id}
-
-        return {"detected_class": None, "track_id": None}  # Return None if no classes are detected
+            return {"detected_class": detected_class}
+        
+        else:
+            # Handle the case where no objects were detected
+            print("No objects detected")
