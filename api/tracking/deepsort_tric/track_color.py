@@ -11,22 +11,20 @@ if len(physical_devices) > 0:
 import tracking.deepsort_tric.core.utils as utils
 from tracking.deepsort_tric.core.yolov4 import filter_boxes
 from tensorflow.python.saved_model import tag_constants
-from tracking.deepsort_tric.core.config_all import cfg
+from tracking.deepsort_tric.core.config_vd import cfg
 from PIL import Image
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from tensorflow.compat.v1 import ConfigProto
 from tensorflow.compat.v1 import InteractiveSession
-
-# deep sort imports
 from tracking.deepsort_tric.deep_sort import preprocessing, nn_matching
 from tracking.deepsort_tric.deep_sort.detection import Detection
 from tracking.deepsort_tric.deep_sort.tracker import Tracker
 from tracking.deepsort_tric.tools import generate_detections as gdet
 from tracking.models import ColorLog
-import datetime
-from collections import Counter, deque
+import time
+from collections import deque
 import math
 from darknet.detect_color import YOLOv4Inference
 import tempfile
@@ -68,27 +66,15 @@ class Track_Color():
         return math.degrees(math.atan2(y, x))
     
     def _vehicle_within_roi(self, bbox, roi_vertices):
-        try:
-            # Convert bbox to integers
-            bbox = bbox.astype(int)
-
-            # Calculate the center of the bounding box
-            xmin, ymin, xmax, ymax = bbox
-            bbox_center = ((xmin + xmax) // 2, (ymin + ymax) // 2)
-
-            # Convert roi_vertices to integers
-            roi_vertices = [(int(x), int(y)) for x, y in roi_vertices]
-
-            # Check if the bbox_center is within the polygonal ROI
-            roi_polygon = np.array(roi_vertices, dtype=np.int32)
-            is_within_roi = cv2.pointPolygonTest(roi_polygon, bbox_center, False) >= 0
-
-            return is_within_roi
-        except Exception as e:
-            print(f"Error in _vehicle_within_roi: {e}")
-            return False
-
-
+        # Calculate the center of the bounding box
+        xmin, ymin, xmax, ymax = map(int, bbox)
+        bbox_center = ((xmin + xmax) // 2, (ymin + ymax) // 2)
+        
+        # Check if the bbox_center is within the polygonal ROI
+        roi_polygon = np.array(roi_vertices, dtype=np.int32)
+        is_within_roi = cv2.pointPolygonTest(roi_polygon, bbox_center, False) >= 0
+        
+        return is_within_roi
 
     def run(self):
             # Definition of the parameters
@@ -113,22 +99,11 @@ class Track_Color():
         config = ConfigProto()
         config.gpu_options.allow_growth = True
         session = InteractiveSession(config=config)
-        #STRIDES, ANCHORS, NUM_CLASS, XYSCALE = utils.load_config(FLAGS)
         input_size = self._size
         video_path = self._video
 
-        # load tflite model if flag is set
-        if self._framework == 'tflite':
-            interpreter = tf.lite.Interpreter(model_path=self._weights)
-            interpreter.allocate_tensors()
-            input_details = interpreter.get_input_details()
-            output_details = interpreter.get_output_details()
-            print(input_details)
-            print(output_details)
-        # otherwise load standard tensorflow saved model
-        else:
-            saved_model_loaded = tf.saved_model.load(self._weights, tags=[tag_constants.SERVING])
-            infer = saved_model_loaded.signatures['serving_default']
+        saved_model_loaded = tf.saved_model.load(self._weights, tags=[tag_constants.SERVING])
+        infer = saved_model_loaded.signatures['serving_default']
 
         # begin video capture
         try:
@@ -148,34 +123,21 @@ class Track_Color():
             out = cv2.VideoWriter(self._output, codec, fps, (width, height))
 
         frame_num = 0
-        current_date = datetime.datetime.now().date()
-        count_dict = {}  # initiate dict for storing counts
-
-        total_counter = 0
-        up_count = 0
-        down_count = 0
-
-        class_counter = Counter()  # store counts of each detected class
-        already_counted = deque(maxlen=50)  # temporary memory for storing counted IDs
-        intersect_info = []  # initialise intersection list
-
+        already_saved = deque(maxlen=50)  # temporary memory for storing counted IDs
         memory = {}
         skip_frames = 1
         processed_frame = 0
         total_frames = 0
-        total_processing_time = 0
-        total_delay = 0
         yolo_inference = YOLOv4Inference()
-        
+        start_time = time.time()
+        print("Processing Color Recognition for Vehicles")
+
         while True:
             return_value, frame = vid.read()  
-            #return_value = vid.grab()
             if return_value:
                 total_frames += 1
 
                 if total_frames % skip_frames == 0:
-                    #_,frame = vid.retrieve()
-                    #frame = cv2.UMat(frame)
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     image = Image.fromarray(frame)
                     processed_frame +=1
@@ -187,26 +149,12 @@ class Track_Color():
                     image_data = image_data / 255.
 
                     image_data = image_data[np.newaxis, ...].astype(np.float32)
-                    start_time = time.time()
 
-                    # run detections on tflite if flag is set
-                    if self._framework == 'tflite':
-                        interpreter.set_tensor(input_details[0]['index'], image_data)
-                        interpreter.invoke()
-                        pred = [interpreter.get_tensor(output_details[i]['index']) for i in range(len(output_details))]
-                        # run detections using yolov3 if flag is set
-                        if self._model == 'yolov3' and self._tiny == True:
-                            boxes, pred_conf = filter_boxes(pred[1], pred[0], score_threshold=0.25,
-                                                            input_shape=tf.constant([input_size, input_size]))
-                        else:
-                            boxes, pred_conf = filter_boxes(pred[0], pred[1], score_threshold=0.25,
-                                                            input_shape=tf.constant([input_size, input_size]))
-                    else:
-                        batch_data = tf.constant(image_data)
-                        pred_bbox = infer(batch_data)
-                        for _, value in pred_bbox.items():
-                            boxes = value[:, :, 0:4]
-                            pred_conf = value[:, :, 4:]
+                    batch_data = tf.constant(image_data)
+                    pred_bbox = infer(batch_data)
+                    for _, value in pred_bbox.items():
+                        boxes = value[:, :, 0:4]
+                        pred_conf = value[:, :, 4:]
 
                     boxes, scores, classes, valid_detections = tf.image.combined_non_max_suppression(
                         boxes=tf.reshape(boxes, (tf.shape(boxes)[0], -1, 1, 4)),
@@ -240,10 +188,8 @@ class Track_Color():
                     # by default allow all classes in .names file
                     allowed_classes = list(class_names.values())
 
-                    # loop through objects and use class index to get class name, allow only classes in allowed_classes list
                     names = []
-                    deleted_indx = []
-                    
+                    deleted_indx = []                    
                     for i in range(num_objects):
                         class_indx = int(classes[i])
                         class_name = class_names[class_indx]
@@ -252,7 +198,6 @@ class Track_Color():
                         else:
                             names.append(class_name)
                             
-                    names = np.array(names)
                     # delete detections that are not in allowed_classes
                     bboxes = np.delete(bboxes, deleted_indx, axis=0)
                     scores = np.delete(scores, deleted_indx, axis=0)
@@ -272,26 +217,27 @@ class Track_Color():
                     tracker.predict()
                     tracker.update(detections)
 
-                    yp = math.tan(self._detect_line_angle*math.pi/180) * frame.shape[1] / 2
-                    x1 = 0
-                    y1 = int(frame.shape[0] / 2) + 100 #int(self._detect_line_position * frame.shape[0] + yp)
-                    x2 = int(frame.shape[1])
-                    y2 = 500#int(self._detect_line_position * frame.shape[0] + yp)
-
-                    line = [(x1, y1), (x2, y2)]
-
-                    # draw yellow line
-                    #cv2.line(frame, line[0], line[1], (200, 200, 200), 1)
+                    x1 = int(frame.shape[1]/2)
+                    y1 = 0
+                    x2 = int(frame.shape[1]/2)
+                    y2 = int(frame.shape[0])
+                    line1 = [(x1, y1), (x2, y2)]
+                    #horizontal
+                    xa = 0
+                    ya = int(frame.shape[0]/2)
+                    xb = int(frame.shape[1])
+                    yb = int(frame.shape[0]/2)
+                    line2 = [(xa, ya), (xb, yb)]
 
                     # Create a dictionary to keep track of the already saved track IDs
-                    saved_track_ids = set()
+                    saved_track_ids = {}
                     
                     # Define the vertices of the polygon (clockwise or counterclockwise order)
                     roi_vertices = [
-                        (0, int(frame.shape[0] / 2)-100),      # Top-left
-                        (frame.shape[1], 0),  # Top-right
-                        (frame.shape[1], int(frame.shape[0])),  # Bottom-right
-                        (0, frame.shape[0])               # Bottom-left
+                        (0,0),      # Top-left
+                        (int(frame.shape[1]), 0),  # Top-right
+                        (int(frame.shape[1]), int(frame.shape[0])),  # Bottom-right
+                        (0, int(frame.shape[0]))               # Bottom-left
                     ]
 
                     # Convert the vertices to a NumPy array of shape (vertices_count, 1, 2)
@@ -300,7 +246,7 @@ class Track_Color():
 
                     # Draw the polygonal ROI using polylines
                     cv2.polylines(frame, [roi_vertices_np], isClosed=True, color=(0, 255, 0), thickness=2)
-                    vehicle_num_dict = {}
+                    vehicle_num_dict = {}  
                     for track in tracker.tracks:
                         if not track.is_confirmed() or track.time_since_update > 1:
                             continue
@@ -318,132 +264,76 @@ class Track_Color():
                         previous_midpoint = memory[track.track_id][0]
 
                         origin_previous_midpoint = (previous_midpoint[0], frame.shape[0] - previous_midpoint[1])
-                        #cv2.line(frame, midpoint, previous_midpoint, (0, 255, 0), 1)
                         # Assign the track_id outside of the intersect block
+                        
                         track_id = str(track.track_id)
-
                         # Check if the object is within the ROI
                         if self._vehicle_within_roi(bbox, roi_vertices):
                             try: 
                                 xmin, ymin, xmax, ymax = map(int, bbox)
                                 vehicle_img = frame[int(ymin):int(ymax), int(xmin):int(xmax)]
-                                img_resized = cv2.resize(vehicle_img, (600, 300), interpolation=cv2.INTER_LANCZOS4)
-
-                                # Perform inference and save annotated image
-                                prediction = yolo_inference.infer_image(img_resized)
-                                
-
-                                if prediction["detected_classes"] is not None:
-                                    clr = prediction["detected_classes"]
-
-                                    # Display the plate number on the frame
-                                    cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (255, 0, 0), 2)
-                                    cv2.putText(frame, clr, (int(bbox[0]), int(bbox[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                                                1e-3 * frame.shape[0], (0, 255, 0), 2)
-
-                            except Exception as e:
-                                print(f"Error processing vehicle within ROI: {e}")
-                                print(f"Image details: bbox={bbox}, roi_vertices={roi_vertices}")
-                                continue  # Skip to the next iteration of the loop
-
-
-                        if self._intersect(midpoint, previous_midpoint, line[0], line[1]) and track.track_id not in already_counted:
-                                print("Entering ROI:", track.track_id)
-                                class_counter[class_name] += 1
-                                total_counter += 1
-
-                                # Set already counted for ID to true.
-                                already_counted.append(track.track_id)  
-
-                                intersection_time = datetime.datetime.now() - datetime.timedelta(microseconds=datetime.datetime.now().microsecond)
-                                angle = self._vector_angle(origin_midpoint, origin_previous_midpoint)
-                                intersect_info.append([class_name, origin_midpoint, angle, intersection_time])
-
-                                if angle > 0:
-                                    up_count += 1
-                                if angle < 0:
-                                    down_count += 1
-                                
-                                
-                                xmin, ymin, xmax, ymax = map(int, bbox)
-                                vehicle_img = frame[int(ymin):int(ymax), int(xmin):int(xmax)]
-                                img_resized = cv2.resize(vehicle_img, (600, 300), interpolation=cv2.INTER_LANCZOS4)
-                                # Save the cropped image only once for each track ID
-                                #track_id = str(track.track_id)
-                                #if track_id not in saved_track_ids and self._intersect(midpoint, previous_midpoint, line[0], line[1]):
-                                if track_id not in saved_track_ids:
-                                    saved_track_ids.add(track.track_id)
-                                    
-                                    prediction = yolo_inference.infer_and_save(img_resized, track.track_id)
+                                #vehicle_img = cv2.cvtColor(vehicle_img, cv2.COLOR_RGB2BGR)
+                                vehicle_resized = cv2.resize(vehicle_img, (2000, 600), interpolation=cv2.INTER_LANCZOS4)
+                                prediction = yolo_inference.infer_image_only(vehicle_resized)
+                                if prediction is not None:                
                                     clr = prediction["detected_class"]
-                                    # Check if clr is not None before concatenating it
-                                    if clr is not None:
-                                        # image_name = clr + ".jpg"
-                                        image_name = f"{track.track_id}_{clr}.jpg"
-                                    else:
-                                        # Handle the case when clr is None, for example:
-                                        # image_name = "unknown.jpg"
-                                        image_name = f"{track.track_id}_unknown.jpg"
-                                    # Save vehicle_num in the dictionary
-                                    vehicle_num_dict[track.track_id] = clr
-
-
-                            # Save the count log to the database
-                                color_log = ColorLog.objects.create(
-                                    filename = image_name,
-                                    color = clr,
-                                )
+                                    cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (255, 0, 0), 2)
+                                    cv2.putText(frame, clr[0], (int(bbox[0]), int(bbox[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                                                    1e-3 * frame.shape[0], (0, 255, 0), 2)
+                    
+                            except cv2.error as e:
+                                continue
                             
-                                # Create temporary files for vehicle_img and frame
-                                vehicle_img_temp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
-                                Image.fromarray(vehicle_img).save(vehicle_img_temp.name)
-                                vehicle_img_temp.close()
+                            
+                        if self._intersect(midpoint, previous_midpoint, line1[0], line1[1]) and track.track_id not in already_saved or self._intersect(midpoint, previous_midpoint, line2[0], line2[1]) and track.track_id not in already_saved:
+                                try:                                
+                                    xmin, ymin, xmax, ymax = map(int, bbox)
+                                    vehicle_img = frame[int(ymin):int(ymax), int(xmin):int(xmax)]
+                                    #vehicle_img = cv2.cvtColor(vehicle_img, cv2.COLOR_RGB2BGR)
+                                    vehicle_resized = cv2.resize(vehicle_img, (2000, 600), interpolation=cv2.INTER_LANCZOS4)   
+                                    track_id = str(track.track_id)    
+                                    if track_id not in saved_track_ids and self._intersect(midpoint, previous_midpoint, line1[0], line1[1]) or track_id not in saved_track_ids and self._intersect(midpoint, previous_midpoint, line2[0], line2[1]):
+                                        saved_track_ids[track_id] = True
+                                        prediction = yolo_inference.infer_and_save(vehicle_resized, track.track_id)
+                                        if prediction is not None:
+                                            clr = prediction["detected_class"]
+                                            image_name = f"{track.track_id}_{clr[0]}.jpg"
+                                        
+                                        vehicle_num_dict[track.track_id] = clr
+                                
+                                    # Save the count log to the database
+                                    color_log = ColorLog.objects.create(
+                                        filename = image_name,
+                                        color = clr,
+                                    )
+                                
+                                    # Create temporary files for vehicle_img and frame
+                                    vehicle_img_temp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+                                    Image.fromarray(vehicle_img).save(vehicle_img_temp.name)
+                                    vehicle_img_temp.close()
 
-                                frame_img_temp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
-                                Image.fromarray(frame).save(frame_img_temp.name)
-                                frame_img_temp.close()
+                                    frame_img_temp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+                                    Image.fromarray(frame).save(frame_img_temp.name)
+                                    frame_img_temp.close()
 
-                                # Save vehicle_image using ImageField
-                                color_log.vehicle_image.save(image_name, open(vehicle_img_temp.name, 'rb'))
+                                    # Save vehicle_image using ImageField
+                                    color_log.vehicle_image.save(image_name, open(vehicle_img_temp.name, 'rb'))
 
-                                # Save frame_image using ImageField
-                                color_log.frame_image.save(image_name, open(frame_img_temp.name, 'rb'))
+                                    # Save frame_image using ImageField
+                                    color_log.frame_image.save(image_name, open(frame_img_temp.name, 'rb'))
 
-                                # Remove temporary files
-                                os.unlink(vehicle_img_temp.name)
-                                os.unlink(frame_img_temp.name)
+                                    # Remove temporary files
+                                    os.unlink(vehicle_img_temp.name)
+                                    os.unlink(frame_img_temp.name)
 
-                        #result = np.asarray(frame)
-                        #result = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)  
-                       
-                    # if enable info flag then print details about each track
-                        if self._info:
-                            print("Tracker ID: {}, Class: {},  BBox Coords (xmin, ymin, xmax, ymax): {}".format(str(track.track_id), class_name, (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))))
-
-                # Delete memory of old tracks.
+                                except cv2.error as e:
+                                        print(f"Error resizing plate_img: {str(e)}")
+                                        continue
+                                
                         # This needs to be larger than the number of tracked objects in the frame.
                     if len(memory) > 50:
                         del memory[list(memory)[0]]
 
-                    if show_detections:
-                        for det in detections:
-                            bbox = det.to_tlbr()
-                            score = "%.2f" % (det.confidence * 100) + "%"
-                            cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (255, 0, 0), 2)  # BLUE BOX
-                            if len(classes) > 0:
-                                det_cls = det.cls
-                                cv2.putText(frame, str(det_cls) + " " + score, (int(bbox[0]), int(bbox[3])), 0,
-                                            1.5e-3 * frame.shape[0], (0, 255, 0), 2)
-
-                    end_time = time.time()
-                    processing_time = (end_time - start_time)*1000
-                    total_processing_time += processing_time
-                    delay = (time.time() - start_time)*1000
-                    total_delay += delay
-
-                    # calculate frames per second of running detections
-                    fps = 1.0 / (time.time() - start_time)
-                    #print("FPS: %.2f" % fps)
                     result = frame.copy()
                     result = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
@@ -456,12 +346,10 @@ class Track_Color():
             else:
                 print('Video has ended or failed, try a different video format!')
                 break
-
-        average_processing_time = total_processing_time / total_frames
-        average_delay = total_delay / total_frames
-
-        print('Average Processing Time: ', average_processing_time,'ms')
-        print('Average Processing Delay: ', average_delay,'ms')  
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        print(f"Total Elapsed Time: {elapsed_time} seconds")  
+        
         
         vid.release()
         cv2.destroyAllWindows()
