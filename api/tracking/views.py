@@ -1,7 +1,12 @@
 from django.contrib.auth.models import User
 from rest_framework.permissions import IsAuthenticated
 from django.views import View
-from django.shortcuts import render
+from PIL import Image
+from io import BytesIO
+
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from django.shortcuts import render,redirect
 from rest_framework import viewsets, status, generics
 from rest_framework.response import Response
 from tracking.serializers import (
@@ -12,13 +17,17 @@ from tracking.serializers import (
     VehicleLogSerializer,
     DownloadRequestSerializer,
 )
-from tracking.models import Video, PlateLog, CountLog, ColorLog, VehicleLog, DownloadRequest
-from tracking.process import process_vid
-from tracking.process_lpr_comb import process_lpd_comb
+from tracking.models import Video, PlateLog, CountLog, ColorLog, VehicleLog, DownloadRequest, SwerveLog, BlockLog, NVRVideo
+from tracking.process_tc_trike import process_trackcount_trike
 from tracking.process_tc_all import process_trackcount_all
 from tracking.process_tc_comb import process_trackcount_comb
+from tracking.process_lpr_trike import process_lpr_trike
 from tracking.process_lpr_all import process_alllpr
+from tracking.process_lpr_comb import process_lpd_comb
 from tracking.process_color import process_color
+from tracking.process_swerving import process_swerving
+from tracking.process_blocking import process_blocking
+from rest_framework.decorators import action
 #from tracking.process_frontside import process_frontside
 
 # Define your Django Rest Framework view
@@ -29,18 +38,106 @@ import io, os
 import base64
 from django.db.models import Count, F
 from datetime import timedelta, datetime
-import shlex
+from django.utils import timezone
+from tracking.forms import SignUpForm
+from django.contrib.auth.views import LoginView as AuthLoginView
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.http import HttpResponse, JsonResponse
+import subprocess
+import os
+from django.shortcuts import render, get_object_or_404
 
 # Create your views here.
-class MyView(View):
+class DarknetTrainView(View):
+    def post(self, request, *args, **kwargs):
+        # Get parameters from the form
+        data_path = request.POST.get('data_path')
+        cfg_path = request.POST.get('cfg_path')
+        weight_path = request.POST.get('weight_path')
+        # ... add other parameters as needed
+
+        # Set the working directory to the Darknet folder
+        darknet_path = '/home/icebox/darknet'  # Replace with the actual path to your Darknet folder
+        os.chdir(darknet_path)
+
+        # Run Darknet training command
+        command = f'./darknet detector train {data_path} {cfg_path} {weight_path}'
+
+        try:
+            result = subprocess.check_output(command, shell=True)
+            return HttpResponse(result)
+        except subprocess.CalledProcessError as e:
+            return HttpResponse(str(e))
+
+    def get(self, request, *args, **kwargs):
+        return render(request, 'html_files/train.html')
+
+class CustomLoginView(AuthLoginView):
+    template_name = 'html_files/login.html'
+
+class SignupView(View):
+
+    def get(self, request):
+        form = SignUpForm()
+        return render(request, 'html_files/signup.html', {'form': form})
+
+    def post(self, request):
+        form = SignUpForm(request.POST)
+        if form.is_valid():
+            form.save()
+            return redirect('login')  # Redirect to the login page after successful signup
+        return render(request, 'html_files/signup.html', {'form': form})
+
+class LPRView(View):
+    
+    def get(self, request):
+        users = User.objects.all()
+        videos = Video.objects.all()
+        context = {'users': users, 'videos': videos}
+        return render(request, 'html_files/lpr.html', context)
+
+class TrackCountView(View):
+    
+    def get(self, request):
+        users = User.objects.all()
+        videos = Video.objects.all()
+        context = {'users': users, 'videos': videos}
+        return render(request, 'html_files/track_count.html', context)  
+
+class ColorRecognitionView(View):
+    
+    def get(self, request):
+        users = User.objects.all()
+        videos = Video.objects.all()
+        context = {'users': users, 'videos': videos}
+        return render(request, 'html_files/color.html', context)
+
+class VioDetectionView(View):
+    
+    def get(self, request):
+        users = User.objects.all()
+        videos = Video.objects.all()
+        context = {'users': users, 'videos': videos}
+        return render(request, 'html_files/violation.html', context) 
+
+class MyView(LoginRequiredMixin, View):
+    login_url = '/login/'  # Set the URL where unauthenticated users are redirected
+
+    def get(self, request):
+        users = User.objects.all()
+        videos = Video.objects.all()
+        context = {'users': users, 'videos': videos}
+        return render(request, 'html_files/index.html', context)
+
+class UploadView(View):
     
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         users = User.objects.all()
-        videos = Video.objects.filter(user=request.user)
+        videos = Video.objects.all()
         context = {'users': users, 'videos': videos}
-        return render(request, 'html_files/index.html', context)
+        return render(request, 'html_files/upload_video.html', context)
 
 class CountLogViewSet(viewsets.ModelViewSet):
     queryset = CountLog.objects.all()
@@ -61,7 +158,7 @@ class VideoUploadViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
 
-class ProcessVideoViewSet(viewsets.ViewSet):
+class ProcessTrikeViewSet(viewsets.ViewSet):
     """
     Perform tricycle Detection in Videos
     """
@@ -76,11 +173,11 @@ class ProcessVideoViewSet(viewsets.ViewSet):
             livestream_url = data.get("camera_feed_url")
 
             if video_path:
-                context = process_vid(video_path=video_path)
+                context = process_trackcount_trike(video_path=video_path)
             elif livestream_url:
                 stream_path = livestream_url
                 #stream_file = cv2.VideoCapture(stream_path)
-                context = process_vid(livestream_url=livestream_url, video_stream=stream_path)
+                context = process_trackcount_trike(livestream_url=livestream_url, video_stream=stream_path)
             else:
                 return Response({"error": "Either video or camera_feed_url must be provided"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -148,7 +245,7 @@ class ColorViewSet(viewsets.ViewSet):
         # Return validation errors if any
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
-class TrikeAllViewSet(viewsets.ViewSet):
+class CombiViewSet(viewsets.ViewSet):
     """
     Perform Vehicle Detection (Trike and Vehicle) in Videos
     """
@@ -176,8 +273,9 @@ class TrikeAllViewSet(viewsets.ViewSet):
 
         # Return validation errors if any
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+       
     
-class LPRViewSet(viewsets.ViewSet):
+class LPRTrikeViewSet(viewsets.ViewSet):
     """
     Perform LPR-trike in Videos
     """
@@ -192,10 +290,10 @@ class LPRViewSet(viewsets.ViewSet):
             livestream_url = data.get("camera_feed_url")
 
             if video_path:
-                context = process_lpd_comb(video_path=video_path)   
+                context = process_lpr_trike(video_path=video_path)   
             elif livestream_url:
                 stream_path = livestream_url
-                context = process_lpd_comb(livestream_url=livestream_url, video_stream=stream_path)
+                context = process_lpr_trike(livestream_url=livestream_url, video_stream=stream_path)
             else:
                 return Response({"error": "Either video or camera_feed_url must be provided"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -234,7 +332,7 @@ class LPRAllViewSet(viewsets.ViewSet):
         # Return validation errors if any
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)  
 
-class LPRFrontSideViewSet(viewsets.ViewSet):
+class LPRCombiViewSet(viewsets.ViewSet):
     """
     Perform LPR_comb in Videos
     """
@@ -262,7 +360,65 @@ class LPRFrontSideViewSet(viewsets.ViewSet):
 
         # Return validation errors if any
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST) 
-        
+
+class SwervingViewSet(viewsets.ViewSet):
+    """
+    Perform Swerving Detection in Videos
+    """
+
+    serializer_class = ProcessVideoSerializers
+
+    def create(self, request):
+        serializer = ProcessVideoSerializers(data=request.data)
+        if serializer.is_valid():
+            data = serializer.validated_data
+            video_path = data.get("video")
+            livestream_url = data.get("camera_feed_url")
+
+            if video_path:
+                context = process_swerving(video_path=video_path)
+            elif livestream_url:
+                stream_path = livestream_url
+                #stream_file = cv2.VideoCapture(stream_path)
+                context = process_swerving(livestream_url=livestream_url, video_stream=stream_path)
+            else:
+                return Response({"error": "Either video or camera_feed_url must be provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+             # Return the path to the output video
+            return Response({'output_video_path': context['output_video_path']}, status=status.HTTP_200_OK)
+
+        # Return validation errors if any
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class BlockingViewSet(viewsets.ViewSet):
+    """
+    Perform Blocking Detection in Videos
+    """
+
+    serializer_class = ProcessVideoSerializers
+
+    def create(self, request):
+        serializer = ProcessVideoSerializers(data=request.data)
+        if serializer.is_valid():
+            data = serializer.validated_data
+            video_path = data.get("video")
+            livestream_url = data.get("camera_feed_url")
+
+            if video_path:
+                context = process_blocking(video_path=video_path)
+            elif livestream_url:
+                stream_path = livestream_url
+                #stream_file = cv2.VideoCapture(stream_path)
+                context = process_blocking(livestream_url=livestream_url, video_stream=stream_path)
+            else:
+                return Response({"error": "Either video or camera_feed_url must be provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+             # Return the path to the output video
+            return Response({'output_video_path': context['output_video_path']}, status=status.HTTP_200_OK)
+
+        # Return validation errors if any
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+          
 class ColorView(View):
 
     def get(self, request):
@@ -314,6 +470,48 @@ class FrameColorView(View):
         }
         return render(request, '/home/icebox/itwatcher_api/tracking/html_files/view_colorframe.html', context)
     
+class FrameSwerveView(View):
+
+    def view_swerveframe(request, log_id):
+        # Retrieve the PlateLog instance based on the log_id
+        swerve_log = SwerveLog.objects.get(id=log_id)
+        context = {
+            'swerve_log': swerve_log,
+        }
+        return render(request, '/home/icebox/itwatcher_api/tracking/html_files/view_swerveframe.html', context)
+    
+class FrameBlockView(View):
+
+    def view_blockframe(request, log_id):
+        # Retrieve the PlateLog instance based on the log_id
+        block_log = BlockLog.objects.get(id=log_id)
+        context = {
+            'block_log': block_log,
+        }
+        return render(request, '/home/icebox/itwatcher_api/tracking/html_files/view_blockframe.html', context)
+
+class SwerveView(View):
+    def get(self, request):
+        swerve_logs = SwerveLog.objects.all()
+        context = {
+            'swerve_logs': swerve_logs,
+        }
+        return render(request, '/home/icebox/itwatcher_api/tracking/html_files/swerving_list.html', context)
+    def post(self, request):
+        # Handle POST requests if needed
+        pass
+
+class BlockView(View):
+    def get(self, request):
+        block_logs = BlockLog.objects.all()
+        context = {
+            'block_logs': block_logs,
+        }
+        return render(request, '/home/icebox/itwatcher_api/tracking/html_files/blocking_list.html', context)
+    def post(self, request):
+        # Handle POST requests if needed
+        pass
+
 class FrameView(View):
 
     def view_frame(request, log_id):
@@ -497,37 +695,29 @@ class DownloadRequestListCreateView(generics.ListCreateAPIView):
         script_path = '/home/icebox/itwatcher_api/tracking/hikvision/media_download.py'
         camera_ip = request.POST.get('camera_ip')  # Adjust to match your form field name
         start_date = request.POST.get('start_date')
+        end_date = start_date
         start_time = request.POST.get('start_time', start)
-        end_date = request.POST.get('end_date')
-        end_time = request.POST.get('end_time', end)
-        content_type = request.POST.get('content_type')  # Assuming you have a content_type field
+        end_time = end
         channel = request.POST.get('channel')
 
-        if start_date:
+        # Set default values for start_datetime and end_datetime
+        start_datetime = None
+        end_datetime = None
+
+        # Check if start_date and start_time are provided
+        if start_date and start_time:
             start_datetime = datetime.strptime(f"{start_date} {start_time}", "%Y-%m-%d %H:%M:%S")
-        else:
-            # Set default value for start_datetime
-            start_datetime = datetime.now()
 
-        if end_date:
-            end_datetime = datetime.strptime(f"{end_date} {end_time}", "%Y-%m-%d %H:%M:%S")
-        else:
-            # Set default value for end_datetime (24 hours after start_datetime)
-            start_datetime = datetime.now()
-            end_datetime = start_datetime + timedelta(hours=24)
+        # Set end_datetime to start_datetime at 23:59:59
+        end_datetime = start_datetime.replace(hour=23, minute=59, second=59)
 
-        # Check if start_datetime is greater than or equal to end_datetime
-        if start_datetime >= end_datetime:
-            error_message = "Start Datetime must be before End Datetime."
-            return render(request, self.template_name, {'error_message': error_message})
-
-        directory_name = f"{start_date}_{start_time}_{end_date}_{end_time}_{channel}"
+        directory_name = f"{start_date}_{start_time}_{channel}"
         directory_path = os.path.join('/home/icebox/itwatcher_api/nvr_videos/10.101.60.148', start_date, channel, start_date)
-        directory_exists = os.path.exists(directory_path)
-
-        print(f"Directory path: {directory_path}")
+        # directory_exists = os.path.exists(directory_path)
+        video_file = f"{directory_path}/{start_time}.mp4"
+        directory_exists = os.path.exists(video_file)
+        print(f"Directory path: {video_file}")
         print(f"Directory exists: {directory_exists}")
-
 
         # Check if the directory already exists
         if directory_exists:
@@ -535,31 +725,48 @@ class DownloadRequestListCreateView(generics.ListCreateAPIView):
             user_response = request.POST.get('user_response', '').lower().strip()
             if user_response != 'y':
                 # User chose not to append, return a response or redirect
-                error_message = f"Video Files for {start_date} already exists. Download aborted."
+                error_message = f"Video Files for {video_file} already exists. Download aborted."
                 print(f"Error message: {error_message}")
                 return render(request, 'html_files/download_success.html', {'error_message': error_message, 'directory_exists': directory_exists})
-                    
-            
+
         # Form the command with arguments
         command = f"python3 {script_path} {camera_ip} {start_date} {start_time} {end_date} {end_time} {channel}"
 
-        if content_type:
-            command += " -p"
 
         # Run the script only if the directory doesn't exist
         if not directory_exists:
             # Run the script and wait for its completion
             process = Popen(command, shell=True, stdout=PIPE, stderr=PIPE)
-            process.communicate()  # Wait for the process to complete
+            stdout, stderr = process.communicate()  # Capture stdout and stderr
+            print(f'Script output: {stdout.decode()}')
+            print(f'Script error: {stderr.decode()}')
 
             # Check the return code for success or failure
             if process.returncode == 0:
                 print('Download executed successfully.')
+
+                # Save the DownloadRequest object to the database
+                download_request = DownloadRequest(
+                    start_datetime=start_datetime,
+                    end_datetime=end_datetime,
+                    channel=channel,
+                    directory_path=directory_path,
+                    timestamp=timezone.now(),
+                )
+                download_request.save()
+
+                NVRVideo.create_from_directory(download_request, directory_path)
+
+                # Return a success response
+                return JsonResponse({'message': 'Video files saved to the database'})
             else:
                 print(f'Download execution failed. Return code: {process.returncode}')
+                # Return an error response
+                return JsonResponse({'error': 'Download execution failed'}, status=500)
 
         # Render the form again (or handle success differently if needed)
         return render(request, 'html_files/download_success.html', {'directory_exists': directory_exists})
+
 
 def success_page(request):
     return render(request, 'html_files/download_success.html')
@@ -567,3 +774,94 @@ def success_page(request):
 class DownloadRequestDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = DownloadRequest.objects.all()
     serializer_class = DownloadRequestSerializer
+
+def generate_report(request, log_id):
+    # Fetch the SwerveLog instance
+    swerve_log_instance = SwerveLog.objects.get(pk=log_id)
+
+    # Construct the filename with the unique identifier
+    filename = f"Violation_Report_{log_id}.pdf"
+
+    # Create a BytesIO buffer to store the PDF
+    buffer = BytesIO()
+
+    # Create a canvas
+    c = canvas.Canvas(buffer, pagesize=A4)
+    # Set left margin
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(30, 750, "iTWatcher")
+    c.drawString(30, 620, "LICENSE PLATE RECOGNITION")
+
+    # Define the font and font size
+    c.setFont("Helvetica", 11)
+    c.drawString(30, 730, "Address: H-Building, Mindanao State University - General Santos City, General Santos City")
+    c.drawString(30, 710, "Contact No.: 09171474280")
+    c.drawString(30, 690, "Email: inteltraf.watcher@msugensan.edu.ph")
+    
+    # Write the table content
+    c.drawString(30, 570, swerve_log_instance.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+    c.drawString(150, 570, str(swerve_log_instance.video_file))
+    c.drawString(260, 570, "Laurel Avenue")
+    c.drawString(360, 570, str(swerve_log_instance.plate_number))
+    c.drawString(460, 570, str(swerve_log_instance.violation))
+    
+    c.setFont("Helvetica-Bold", 12)
+
+    # Write the table headers
+    c.drawString(30, 590, "Date and Time")
+    c.drawString(150, 590, "Video Source")
+    c.drawString(260, 590, "Location")
+    c.drawString(360, 590, "Plate Number")
+    c.drawString(460, 590, "Traffic Violation")
+    c.drawString(30, 520,"License Plate Image:")
+    c.drawString(30, 420,"Warped License Plate Image:")
+    c.drawString(30, 320,"Screen Capture:")
+    # Calculate the position and size of the plate image
+    plate_image_width = 100
+    plate_image_height = 50
+    plate_image_x = 100
+    plate_image_y = 500 - plate_image_height
+
+    # Draw the plate image if available
+    if swerve_log_instance.plate_image:
+        plate_image_path = swerve_log_instance.plate_image.path
+        plate_image = Image.open(plate_image_path)
+        c.drawImage(plate_image_path, plate_image_x, plate_image_y, width=plate_image_width, height=plate_image_height)
+
+    # Calculate the position and size of the plate image
+    warped_image_width = 100
+    warped_image_height = 50
+    warped_image_x = 100
+    warped_image_y = 400 - warped_image_height
+
+    # Draw the plate image if available
+    if swerve_log_instance.warped_image:
+        warped_image_path = swerve_log_instance.warped_image.path
+        warped_image = Image.open(warped_image_path)
+        c.drawImage(warped_image_path, warped_image_x, warped_image_y, width=warped_image_width, height=warped_image_height)
+
+    # Calculate the position and size of the frame image
+    frame_image_width = 300
+    frame_image_height = 200
+    frame_image_x = 100
+    frame_image_y = 300 - frame_image_height
+
+    # Draw the frame image if available
+    if swerve_log_instance.frame_image:
+        frame_image_path = swerve_log_instance.frame_image.path
+        frame_image = Image.open(frame_image_path)
+        c.drawImage(frame_image_path, frame_image_x, frame_image_y, width=frame_image_width, height=frame_image_height)
+
+    # Save the PDF
+    c.showPage()
+    c.save()
+
+    # Go to the beginning of the buffer
+    buffer.seek(0)
+
+    # Create a Django response and return the PDF with the unique filename
+    response = HttpResponse(content_type='application/pdf')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response.write(buffer.getvalue())
+    return response
